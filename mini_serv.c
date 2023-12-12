@@ -1,85 +1,100 @@
-#include <unistd.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <errno.h>
 #include <string.h>
-#include <netinet/in.h>
+#include <unistd.h>
+#include <netdb.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <stdlib.h>
+#include <stdio.h>
 
-typedef struct s_client{
+typedef struct s_client {
 	int id;
 	char msg[1024];
 } t_client;
 
 t_client clients[1024];
-char toread[120000], towrite[120000];
-fd_set readset, writeset, activeset;
-int max = 0, next = 0;
+char to_write[120000], to_read[120000];
+int next = 0, max = 0;
+fd_set write_set, read_set, active_set;
 
-void fterror(char *s){
-	s ? write(2, s, strlen(s)) : write(2, "Fatal error", strlen("Fatal error"));
+
+
+
+void err(char *str) {
+	while(*str) 
+		write(2, str++, 1);
 	write(2, "\n", 1);
 	exit(1);
 }
 
-void sendall(int n){
-	for(int i = 0; i <= max; i++)
-		if(FD_ISSET(i, &writeset) && i != n)
-			send(i, towrite, strlen(towrite), 0);
+void send_all(int fd) {
+	for (int i = 0; i <= max; i++) {
+		if (FD_ISSET(i, &write_set) && i != fd)
+			send(i, to_write, strlen(to_write), 0);
+	
+	}
 }
-int main(int argc, char **argv){
-	if(argc !=2)
-		fterror(0);
-	int serv = socket(2,1,0);
-	if(serv < 0)
-		fterror(0);
-	FD_ZERO(&activeset);
+
+int main(int ac, char **av) {
+	if (ac != 2) 
+		err("Wrong number of arguments");
+
+	FD_ZERO(&active_set);
+
+	int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+	if (sockfd < 0)
+		err("Fatal error");
+
+	FD_SET(sockfd, &active_set);
 	bzero(&clients, sizeof(clients));
-	max = serv;
-	FD_SET(serv, &activeset);
-	struct sockaddr_in adr;
+	struct sockaddr_in servaddr;
+	max = sockfd;
+	bzero(&servaddr, sizeof(servaddr));
+
+	servaddr.sin_family = AF_INET;
+	servaddr.sin_addr.s_addr = htonl(2130706433);
+	servaddr.sin_port = htons(atoi(av[1]));
+
+	if ((bind(sockfd, (const struct sockaddr *)&servaddr, sizeof(servaddr))) != 0)
+		err("Fatal error");
+	if (listen(sockfd, 10) != 0)
+		err("Fatal error");
+
 	socklen_t len;
-	bzero(&adr, sizeof(adr));
-	adr.sin_family = 2;
-	adr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-	adr.sin_port = htons(atoi(argv[1]));
-	if(bind(serv, (const struct sockaddr *)&adr, sizeof(adr)) < 0)
-		fterror(0);
-	if(listen(serv, 10) < 0)
-		fterror(0);
-	while(1){
-		readset = writeset = activeset;
-		if(select(max + 1, &readset, &writeset,0 ,0) < 0)
+
+	while(1) {
+		read_set = write_set = active_set;
+
+		if (select(max + 1, &read_set, &write_set, NULL, NULL) < 0)
 			continue;
-		for(int fd = 0; fd <= max; fd++){
-			if(FD_ISSET(fd, &readset) && fd == serv){
-				int cur = accept(fd, (struct sockaddr *)&adr, &len);
-				if(cur < 0)
-					continue;
-				max = max > cur ? max : cur;
-				clients[cur].id = next++;
-				FD_SET(cur, &activeset);
-				sprintf(towrite, "server: client %d just arrived\n", clients[cur].id);
-				sendall(cur);
+		for(int fd = 0; fd <= max; fd++) {
+			if (FD_ISSET(fd, &read_set) && fd == sockfd) {
+				int newsockfd = accept(sockfd, (struct sockaddr *)&servaddr, &len);
+				if (newsockfd < 0)
+					err("Fatal error");
+				max = max > newsockfd ? max : newsockfd;
+				clients[newsockfd].id = next++;
+				FD_SET(newsockfd, &active_set);
+				sprintf(to_write, "server: client %d just arrived\n", clients[newsockfd].id);
+				send_all(newsockfd);
 				break;
 			}
-			if(FD_ISSET(fd, &readset) && fd != serv){
-				int res = recv(fd, toread, 65536, 0);
-				if(res <= 0){
-					sprintf(towrite, "server: client %d just left\n", clients[fd].id);
-					sendall(fd);
-					FD_CLR(fd, &activeset);
+			if (FD_ISSET(fd, &read_set) && fd != sockfd) {
+				int buf = recv(fd, to_read, 120000, 0);
+				if (buf <= 0) {
+					sprintf(to_write, "server: client %d just left\n", clients[fd].id);
+					send_all(fd);
+					FD_CLR(fd, &active_set);
 					close(fd);
-					break;
-				}
-				else{
-					for(int i = 0, j = strlen(clients[fd].msg); i < res; i++,j++){
-						clients[fd].msg[j] = toread[i];
-						if(clients[fd].msg[j] == '\n'){
+				} else {
+					for (int i = 0, j = strlen(clients[fd].msg); i < buf; i++, j++) {
+						clients[fd].msg[j] = to_read[i];
+						if (clients[fd].msg[j] == '\n') {
 							clients[fd].msg[j] = '\0';
-							sprintf(towrite, "client %d: %s\n", clients[fd].id, clients[fd].msg);
-							sendall(fd);
-							bzero(clients[fd].msg, strlen(clients[fd].msg));
-							j =-1;
+							sprintf(to_write, "client %d: %s\n", clients[fd].id, clients[fd].msg);
+							send_all(fd);
+							bzero(&clients[fd].msg, sizeof(clients[fd].msg));
+							j = -1;
 						}
 					}
 					break;
@@ -87,5 +102,5 @@ int main(int argc, char **argv){
 			}
 		}
 	}
+	return 0;
 }
-
